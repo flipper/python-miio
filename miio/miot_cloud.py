@@ -1,19 +1,15 @@
 """Module implementing handling of miot schema files."""
 
+from datetime import datetime, timedelta, timezone
 import json
 import logging
-from datetime import datetime, timedelta, timezone
 from operator import attrgetter
 from pathlib import Path
 from typing import Optional
 
-import platformdirs
 from micloud.miotspec import MiotSpec
-
-try:
-    from pydantic.v1 import BaseModel, Field
-except ImportError:
-    from pydantic import BaseModel, Field
+import platformdirs
+from pydantic import BaseModel, Field
 
 from miio import CloudException
 from miio.miot_models import DeviceModel
@@ -25,7 +21,7 @@ class ReleaseInfo(BaseModel):
     """Information about individual miotspec release."""
 
     model: str
-    status: Optional[str]  # only available on full listing
+    status: str | None = None  # only available on full listing
     type: str
     version: int
 
@@ -46,7 +42,7 @@ class ReleaseList(BaseModel):
             raise CloudException(
                 f"No releases found for {model=} with {status_filter=}"
             )
-        elif len(releases) > 1:
+        if len(releases) > 1:
             _LOGGER.warning(
                 "%s versions found for model %s: %s, using the newest one",
                 len(releases),
@@ -73,25 +69,25 @@ class MiotCloud:
         cache_file = self._cache_dir / MiotCloud.MODEL_MAPPING_FILE
         try:
             mapping = self._file_from_cache(cache_file)
-            return ReleaseList.parse_obj(mapping)
+            return ReleaseList.model_validate(mapping)
         except FileNotFoundError:
             _LOGGER.debug("Did not found non-stale %s, trying to fetch", cache_file)
 
         specs = MiotSpec.get_specs()
         self._write_to_cache(cache_file, specs)
 
-        return ReleaseList.parse_obj(specs)
+        return ReleaseList.model_validate(specs)
 
     def get_device_model(self, model: str) -> DeviceModel:
         """Get device model for model name."""
         file = self._cache_dir / f"{model}.json"
         try:
             spec = self._file_from_cache(file)
-            return DeviceModel.parse_obj(spec)
+            return DeviceModel.model_validate(spec)
         except FileNotFoundError:
-            _LOGGER.debug("Unable to find schema file %s, going to fetch" % file)
+            _LOGGER.debug(f"Unable to find schema file {file}, going to fetch")
 
-        return DeviceModel.parse_obj(self.get_model_schema(model))
+        return DeviceModel.model_validate(self.get_model_schema(model))
 
     def get_model_schema(self, model: str) -> dict:
         """Get the preferred schema for the model."""
@@ -100,8 +96,7 @@ class MiotCloud:
 
         model_file = self._cache_dir / f"{release_info.model}.json"
         try:
-            spec = self._file_from_cache(model_file)
-            return spec
+            return self._file_from_cache(model_file)
         except FileNotFoundError:
             _LOGGER.debug(f"Cached schema not found for {model}, going to fetch it")
 

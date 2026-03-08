@@ -3,11 +3,7 @@ import logging
 from typing import TYPE_CHECKING, Optional
 
 import click
-
-try:
-    from pydantic.v1 import BaseModel, Field
-except ImportError:
-    from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, PrivateAttr
 
 try:
     from rich import print as echo
@@ -59,7 +55,7 @@ class CloudDeviceInfo(BaseModel):
     is_online: bool = Field(alias="isOnline")
     rssi: int
 
-    _raw_data: dict = Field(repr=False)
+    _raw_data: dict = PrivateAttr(default_factory=dict)
 
     @property
     def is_child(self):
@@ -71,8 +67,7 @@ class CloudDeviceInfo(BaseModel):
         """Return the raw data."""
         return self._raw_data
 
-    class Config:
-        extra = "allow"
+    model_config = {"extra": "allow"}
 
 
 class CloudInterface:
@@ -120,7 +115,7 @@ class CloudInterface:
         devs = {}
         for single_entry in data:
             single_entry["locale"] = locale
-            devinfo = CloudDeviceInfo.parse_obj(single_entry)
+            devinfo = CloudDeviceInfo.model_validate(single_entry)
             devinfo._raw_data = single_entry
             devs[f"{devinfo.did}_{locale}"] = devinfo
 
@@ -208,7 +203,7 @@ def cloud_list(ctx: click.Context, locale: Optional[str], raw: bool):
                 echo(f"\t\t\tDID: {c.did}")
                 echo(f"\t\t\tModel: {c.model}")
 
-        other_fields = dev.__fields_set__ - set(dev.__fields__.keys())
+        other_fields = dev.model_fields_set - set(dev.model_fields.keys())
         echo("\tOther fields:")
         for field in other_fields:
             if field.startswith("_"):

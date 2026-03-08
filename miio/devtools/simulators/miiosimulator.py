@@ -6,11 +6,8 @@ import logging
 from typing import Optional, Union
 
 import click
-
-try:
-    from pydantic.v1 import BaseModel, Field, PrivateAttr
-except ImportError:
-    from pydantic import BaseModel, Field, PrivateAttr
+from pydantic import BaseModel, Field, PrivateAttr
+from pydantic_core import core_schema
 from yaml import safe_load
 
 from miio import PushServer
@@ -22,8 +19,12 @@ _LOGGER = logging.getLogger(__name__)
 
 class Format(type):
     @classmethod
-    def __get_validators__(cls):
-        yield cls.convert_type
+    def __get_pydantic_core_schema__(cls, source_type, handler):
+        """Pydantic v2 custom type validation."""
+        return core_schema.no_info_after_validator_function(
+            cls.convert_type,
+            core_schema.str_schema(),
+        )
 
     @classmethod
     def convert_type(cls, input: str):
@@ -42,15 +43,14 @@ class MiioProperty(BaseModel):
 
     name: str
     type: Format
-    value: Optional[Union[str, bool, int]]
+    value: Optional[Union[str, bool, int]] = None
     models: list[str] = Field(default=[])
     setter: Optional[str] = None
     description: Optional[str] = None
     min: Optional[int] = None
     max: Optional[int] = None
 
-    class Config:
-        extra = "forbid"
+    model_config = {"extra": "forbid"}
 
 
 class MiioAction(BaseModel):
@@ -83,8 +83,7 @@ class SimulatedMiio(BaseModel):
     methods: list[MiioMethod] = Field(default=[])
     _model: Optional[str] = PrivateAttr(default=None)
 
-    class Config:
-        extra = "forbid"
+    model_config = {"extra": "forbid"}
 
 
 class MiioSimulator:
@@ -157,7 +156,7 @@ async def main(dev):
 def miio_simulator(file, model):
     """Simulate miio device."""
     data = file.read()
-    dev = SimulatedMiio.parse_obj(safe_load(data))
+    dev = SimulatedMiio.model_validate(safe_load(data))
     _LOGGER.info("Available models: %s", dev.models)
     if model is not None:
         dev._model = model

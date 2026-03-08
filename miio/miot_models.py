@@ -2,12 +2,16 @@ import logging
 from abc import abstractmethod
 from datetime import timedelta
 from enum import Enum
-from typing import Any, Optional
+from typing import Annotated, Any, Optional, Union
 
-try:
-    from pydantic.v1 import BaseModel, Field, PrivateAttr, root_validator
-except ImportError:
-    from pydantic import BaseModel, Field, PrivateAttr, root_validator
+from pydantic import (
+    BaseModel,
+    BeforeValidator,
+    Field,
+    PlainSerializer,
+    PrivateAttr,
+    model_validator,
+)
 
 from .descriptors import (
     AccessFlags,
@@ -18,6 +22,39 @@ from .descriptors import (
 )
 
 _LOGGER = logging.getLogger(__name__)
+
+
+def parse_urn(v: Union[str, "URN"]) -> "URN":
+    """Parse URN from string."""
+    if isinstance(v, URN):
+        return v
+    if not isinstance(v, str) or ":" not in v:
+        raise TypeError("invalid type")
+
+    _, namespace, type, name, id_, model, version, *unexpected = v.split(":")
+
+    return URN(
+        namespace=namespace,
+        type=type,
+        name=name,
+        internal_id=id_,
+        model=model,
+        version=int(version),
+        unexpected=unexpected if unexpected else None,
+        parent_urn=None,
+    )
+
+
+def serialize_urn(v: "URN") -> str:
+    """Serialize URN to string."""
+    return v.urn_string
+
+
+URNType = Annotated[
+    "URN",
+    BeforeValidator(parse_urn),
+    PlainSerializer(serialize_urn, return_type=str),
+]
 
 
 class URN(BaseModel):
@@ -33,30 +70,9 @@ class URN(BaseModel):
     internal_id: str
     model: str
     version: int
-    unexpected: Optional[list[str]]
+    unexpected: Optional[list[str]] = None
 
     parent_urn: Optional["URN"] = Field(None, repr=False)
-
-    @classmethod
-    def __get_validators__(cls):
-        yield cls.validate
-
-    @classmethod
-    def validate(cls, v):
-        if not isinstance(v, str) or ":" not in v:
-            raise TypeError("invalid type")
-
-        _, namespace, type, name, id_, model, version, *unexpected = v.split(":")
-
-        return cls(
-            namespace=namespace,
-            type=type,
-            name=name,
-            internal_id=id_,
-            model=model,
-            version=version,
-            unexpected=unexpected if unexpected else None,
-        )
 
     @property
     def urn_string(self) -> str:
@@ -70,24 +86,22 @@ class URN(BaseModel):
         return f"<URN {self.urn_string} parent:{self.parent_urn}>"
 
 
-class MiotFormat(type):
-    """Custom type to convert textual presentation to python type."""
+def parse_miot_format(v: Union[str, type]) -> type:
+    """Parse MiotFormat from string."""
+    if isinstance(v, type):
+        return v
+    if v.startswith("uint") or v.startswith("int"):
+        return int
+    type_map = {
+        "bool": bool,
+        "string": str,
+        "float": float,
+        "none": type(None),
+    }
+    return type_map[v]
 
-    @classmethod
-    def __get_validators__(cls):
-        yield cls.convert_type
 
-    @classmethod
-    def convert_type(cls, input: str):
-        if input.startswith("uint") or input.startswith("int"):
-            return int
-        type_map = {
-            "bool": bool,
-            "string": str,
-            "float": float,
-            "none": None,
-        }
-        return type_map[input]
+MiotFormat = Annotated[type, BeforeValidator(parse_miot_format)]
 
 
 class MiotEnumValue(BaseModel):
@@ -96,21 +110,21 @@ class MiotEnumValue(BaseModel):
     description: str
     value: int
 
-    @root_validator
+    @model_validator(mode="before")
+    @classmethod
     def description_from_value(cls, values):
         """If description is empty, use the value instead."""
         if not values["description"]:
             values["description"] = str(values["value"])
         return values
 
-    class Config:
-        extra = "forbid"
+    model_config = {"extra": "forbid"}
 
 
 class MiotBaseModel(BaseModel):
     """Base model for all other miot models."""
 
-    urn: URN = Field(alias="type")
+    urn: URNType = Field(alias="type")
     description: str
 
     extras: dict = Field(default_factory=dict, repr=False)
@@ -165,7 +179,8 @@ class MiotAction(MiotBaseModel):
     inputs: Any = Field(alias="in")
     outputs: Any = Field(alias="out")
 
-    @root_validator(pre=True)
+    @model_validator(mode="before")
+    @classmethod
     def default_null_to_empty(cls, values):
         """Coerce null values for in&out to empty lists."""
         if values["in"] is None:
@@ -205,8 +220,7 @@ class MiotAction(MiotBaseModel):
         """Return unique identifier."""
         return f"{self.normalized_name}_{self.siid}_{self.aiid}"
 
-    class Config:
-        extra = "forbid"
+    model_config = {"extra": "forbid"}
 
 
 class MiotAccess(Enum):
@@ -221,12 +235,12 @@ class MiotProperty(MiotBaseModel):
     piid: int = Field(alias="iid")
 
     format: MiotFormat
-    access: list[MiotAccess] = Field(default=["read"])
+    access: list[MiotAccess] = Field(default=[MiotAccess.Read])
     unit: Optional[str] = None
 
-    range: Optional[list[int]] = Field(alias="value-range")
-    choices: Optional[list[MiotEnumValue]] = Field(alias="value-list")
-    gatt_access: Optional[list[Any]] = Field(alias="gatt-access")
+    range: Optional[list[int]] = Field(default=None, alias="value-range")
+    choices: Optional[list[MiotEnumValue]] = Field(default=None, alias="value-list")
+    gatt_access: Optional[list[Any]] = Field(default=None, alias="gatt-access")
 
     source: Optional[int] = None
 
@@ -244,10 +258,11 @@ class MiotProperty(MiotBaseModel):
             current = f"{selected} (value: {value})"
             return current
 
-        if self.format == bool:
+        if self.format is bool:
             return bool(value)
 
         unit_map = {
+            None: "",
             "none": "",
             "percentage": "%",
             "minutes": timedelta(minutes=1),
@@ -387,8 +402,7 @@ class MiotProperty(MiotBaseModel):
         """Return unique identifier."""
         return f"{self.normalized_name}_{self.siid}_{self.piid}"
 
-    class Config:
-        extra = "forbid"
+    model_config = {"extra": "forbid"}
 
 
 class MiotEvent(MiotBaseModel):
@@ -402,15 +416,14 @@ class MiotEvent(MiotBaseModel):
         """Return unique identifier."""
         return f"{self.normalized_name}_{self.siid}_{self.eiid}"
 
-    class Config:
-        extra = "forbid"
+    model_config = {"extra": "forbid"}
 
 
 class MiotService(BaseModel):
     """Service presentation for miot."""
 
     siid: int = Field(alias="iid")
-    urn: URN = Field(alias="type")
+    urn: URNType = Field(alias="type")
     description: str
 
     properties: list[MiotProperty] = Field(default_factory=list, repr=False)
@@ -458,15 +471,14 @@ class MiotService(BaseModel):
         """
         return self.urn.name.replace(":", "_").replace("-", "_")
 
-    class Config:
-        extra = "forbid"
+    model_config = {"extra": "forbid"}
 
 
 class DeviceModel(BaseModel):
     """Device presentation for miot."""
 
     description: str
-    urn: URN = Field(alias="type")
+    urn: URNType = Field(alias="type")
     services: list[MiotService] = Field(repr=False)
 
     # internal mappings to simplify accesses
@@ -509,5 +521,4 @@ class DeviceModel(BaseModel):
         """Return the property model for given siid, piid."""
         return self._properties_by_id[siid][piid]
 
-    class Config:
-        extra = "forbid"
+    model_config = {"extra": "forbid"}
